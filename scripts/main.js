@@ -326,19 +326,13 @@ function checkIncomingRequests() {
 }
 
 // ── Дерево технологий ────────────────────────────────────────────
-
-Events.on(ContentInitEvent, () => {
-    const launcherBlock = Vars.content.block("pochta-rossii-postal-launcher");
-    const coreNode = TechTree.all.find(n => n.block === Blocks.coreShard);
-
-    if (launcherBlock && coreNode) {
-        const node = new TechNode(coreNode, launcherBlock, [
-            new ItemStack(Items.copper, 100)
-        ]);
-        coreNode.children.add(node);
-        TechTree.all.add(node);
-    }
-});
+// Регистрация узла TechTree теперь делается декларативно через поле
+// "research" в blocks/postal-launcher.json — парсер контента (ContentParser.java)
+// сам создаёт TechNode и подвешивает его к родителю по имени. Ручной JS-код
+// здесь был не нужен и содержал баг: у TechNode есть поле "content", а не
+// "block", поэтому TechTree.all.find(n => n.block === Blocks.coreShard) всегда
+// возвращал undefined, if-блок не выполнялся, и нода никогда не создавалась —
+// без единой ошибки в логе.
 
 // ── HUD кнопка ────────────────────────────────────────────────────
 

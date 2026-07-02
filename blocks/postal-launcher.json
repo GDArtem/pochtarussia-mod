@@ -7,6 +7,12 @@
   "requirements": [
     {"item": "copper", "amount": 100}
   ],
+  "research": {
+    "parent": "core-shard",
+    "requirements": [
+      {"item": "copper", "amount": 100}
+    ]
+  },
   "category": "units",
   "hasItems": true,
   "itemCapacity": 500,
