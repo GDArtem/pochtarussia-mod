@@ -1,0 +1,14 @@
+{
+  "type": "UnitType",
+  "flying": true,
+  "speed": 1.5,
+  "health": 250,
+  "hitSize": 10,
+  "itemCapacity": 500,
+  "engineOffset": 5,
+  "engineSize": 3,
+  "rotateSpeed": 5,
+  "drag": 0.06,
+  "accel": 0.08,
+  "constructor": "UnitEntity"
+}

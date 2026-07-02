@@ -1,0 +1,10 @@
+{
+  "name": "Pochta Rossii",
+  "displayName": "Почта России",
+  "author": "Artem",
+  "description": "Запрашивай поставку ресурсов союзнику! Юнит-фургон 'Почта России' летит от твоего ядра к ядру союзника и доставляет ресурсы. Турели его не трогают.",
+  "version": "1.0.0",
+  "minGameVersion": "158",
+  "hidden": false,
+  "main": "scripts/main.js"
+}
