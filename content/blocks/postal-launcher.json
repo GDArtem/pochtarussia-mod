@@ -13,10 +13,6 @@
     ]
   },
   "category": "units",
-  "hasItems": true,
-  "itemCapacity": 500,
   "hasPower": false,
-  "plans": [
-    {"unit": "pochta-carrier", "time": 60, "requirements": []}
-  ]
+  "plans": []
 }
