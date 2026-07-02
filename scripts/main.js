@@ -13,11 +13,21 @@ const DELIVER_ITEMS = [
 ];
 
 // ── Состояние ─────────────────────────────────────────────────────
-let activeDeliveries = [];   // летящие юниты
-let pendingRequests = [];    // ожидающие подтверждения запросы
+// ВАЖНО: JS-скрипт мода выполняется НЕЗАВИСИМО на сервере и на каждом
+// клиенте — свой Rhino-контекст, своя память. Обычные переменные верхнего
+// уровня НЕ синхронизируются по сети сами по себе. pendingRequests поэтому
+// хранится только как источник правды НА СЕРВЕРЕ (см. блок "Сеть" ниже);
+// клиент не читает/не пишет её напрямую, а общается с сервером через
+// Call.clientPacketReliable(...) / Call.serverPacketReliable(...) —
+// это встроенный generic RPC-канал Mindustry (NetClient.java/NetServer.java,
+// @Remote(targets = Loc.server) и @Remote(targets = Loc.client)),
+// предназначенный именно для модов/плагинов.
+let activeDeliveries = [];   // летящие юниты (сервер применяет ко всем через спавн юнита - синхронизируется движком автоматически)
+let pendingRequests = [];    // ожидающие подтверждения запросы — актуальны ТОЛЬКО на сервере
 let buttonCooldown = 0;
 let selectedItem = DELIVER_ITEMS[0];
 let selectedAmount = 100;
+let nextRequestId = 1;
 
 // ── Хелперы ───────────────────────────────────────────────────────
 
@@ -111,8 +121,15 @@ function spawnDelivery(fromLauncher, toLauncher, item, amount, fromTeam) {
 }
 
 // ── Апдейт полётов ────────────────────────────────────────────────
+// spawnDelivery() и updateDeliveries() трогают авторитетное состояние игры
+// (unit.add(), core.items.remove/add) — это должно выполняться ТОЛЬКО на
+// сервере (или в одиночной игре без сети). Юнит и его перемещение затем
+// сами реплицируются клиентам штатным механизмом синка сущностей движка
+// (entitySnapshot/blockSnapshot), т.е. отдельно синхронизировать unit.vel
+// вручную клиенту не нужно — он получит уже актуальную позицию по сети.
 
 function updateDeliveries() {
+    if (!isHostAuthority()) return;
     activeDeliveries = activeDeliveries.filter(d => {
         if (!d.unit || !d.unit.isValid() || !d.unit.isAlive()) return false;
         if (d.delivered) return false;
@@ -238,16 +255,10 @@ function showRequestDialog() {
             return;
         }
 
-        // Добавляем запрос в очередь — получатель увидит уведомление
-        pendingRequests.push({
-            fromTeam: myTeam,
-            toTeam: selectedTeam,
-            item: selectedItem,
-            amount: selectedAmount,
-            fromLauncher: myLaunchers[0],
-            toLauncher: theirLaunchers[0],
-            timer: 30 * 60  // 30 секунд на ответ
-        });
+        // НЕ пишем в pendingRequests локально — это не будет видно другим
+        // машинам. Вместо этого шлём запрос серверу (единый источник правды),
+        // а сервер сам решит, кому и что показать.
+        sendRequestToServer(selectedTeam.id, selectedItem.name, selectedAmount);
 
         buttonCooldown = COOLDOWN_SECONDS * 60;
         Vars.ui.announce(
@@ -262,68 +273,187 @@ function showRequestDialog() {
     dialog.show();
 }
 
-// ── Обработка входящих запросов ───────────────────────────────────
+// ── Обработка входящих запросов (диалог у ПОЛУЧАТЕЛЯ) ─────────────
+// Вызывается только из onServerRequest(...) в сетевом блоке ниже, то есть
+// только после того как СЕРВЕР явно адресовал этот конкретный запрос
+// именно этому клиенту через Call.serverPacketReliable(player, ...).
+// Локально из pendingRequests сюда больше никто не попадает.
 
-let shownRequests = new Set();
-
-function checkIncomingRequests() {
+function showIncomingRequestDialog(req) {
     const myTeam = Vars.player.team();
+    const senderName = getTeamName(req.fromTeam);
+    const dialog = new BaseDialog("Почта России — Входящий запрос");
+    dialog.cont.defaults().pad(8);
+    dialog.cont.add(
+        "[cyan]" + senderName + "[] просит поставить:\n" +
+        "[yellow]" + req.amount + "x " + getItemName(req.item) + "[]"
+    ).row();
 
-    pendingRequests.forEach((req, idx) => {
-        if (req.toTeam.id !== myTeam.id) return;
-        if (shownRequests.has(idx)) return;
-        shownRequests.add(idx);
+    const myCore = myTeam.core();
+    const available = myCore ? myCore.items.get(req.item) : 0;
+    dialog.cont.add("[lightgray]У вас есть: [white]" + available + "[]").row();
 
-        // Показываем диалог подтверждения
-        const senderName = getTeamName(req.fromTeam);
-        const dialog = new BaseDialog("Почта России — Входящий запрос");
-        dialog.cont.defaults().pad(8);
-        dialog.cont.add(
-            "[cyan]" + senderName + "[] просит поставить:\n" +
-            "[yellow]" + req.amount + "x " + getItemName(req.item) + "[]"
-        ).row();
+    const btnTable = dialog.cont.table().get();
 
-        const myCore = myTeam.core();
-        const available = myCore ? myCore.items.get(req.item) : 0;
-        dialog.cont.add("[lightgray]У вас есть: [white]" + available + "[]").row();
+    btnTable.button("[green]Принять", () => {
+        sendResponseToServer(req.id, true);
+        dialog.hide();
+    }).width(120).height(50).pad(6);
 
-        // Кнопки
-        const btnTable = dialog.cont.table().get();
+    btnTable.button("[red]Отклонить", () => {
+        sendResponseToServer(req.id, false);
+        Vars.ui.announce("[red]Запрос от " + senderName + " отклонён.", 3);
+        dialog.hide();
+    }).width(120).height(50).pad(6);
 
-        btnTable.button("[green]Принять", () => {
-            // Найти установки
-            const fromLauncher = getLaunchersOfTeam(myTeam)[0];
-            if (!fromLauncher) {
-                Vars.ui.showInfo("[red]Нет вашей Пусковой установки!");
-                dialog.hide();
-                return;
+    dialog.show();
+}
+
+// ── Сеть: сервер — единый источник правды ──────────────────────────
+// Используем встроенный generic packet API Mindustry вместо самодельного
+// @Remote (для JS-мода это самый простой путь — не требует Java/аннотаций):
+//   Call.clientPacketReliable(type, contents)                — клиент → сервер
+//   Call.serverPacketReliable(player, type, contents)         — сервер → 1 клиент
+//   Vars.netClient.addPacketHandler(type, contents => ...)    — приём на клиенте
+//   Vars.netServer.addPacketHandler(type, (player, contents) => ...) — приём на сервере
+// Payload — строка, поэтому гоняем JSON.stringify/JSON.parse.
+// Источники: core/src/mindustry/core/NetClient.java, NetServer.java (Anuken/Mindustry).
+
+const PACKET_REQUEST = "pochta-request";   // клиент → сервер: новый запрос поставки
+const PACKET_RESPONSE = "pochta-response"; // клиент → сервер: ответ (принять/отклонить)
+const PACKET_INCOMING = "pochta-incoming"; // сервер → клиент: покажи диалог входящего запроса
+const PACKET_RESULT = "pochta-result";     // сервер → клиент: итог (одобрено/отклонено/просрочено)
+
+function sendRequestToServer(toTeamId, itemName, amount) {
+    Call.clientPacketReliable(PACKET_REQUEST, JSON.stringify({
+        toTeamId: toTeamId,
+        item: itemName,
+        amount: amount
+    }));
+}
+
+function sendResponseToServer(requestId, accepted) {
+    Call.clientPacketReliable(PACKET_RESPONSE, JSON.stringify({
+        id: requestId,
+        accepted: accepted
+    }));
+}
+
+// ── Сеть: обработчики НА СЕРВЕРЕ ────────────────────────────────────
+// pendingRequests живёт только здесь. isServer() гарантирует, что этот
+// код не пытается что-то делать на клиентах (там netServer недоступен
+// в актуальном виде и Vars.net.server() === false).
+
+function isHostAuthority() {
+    // Одиночная игра/локальный хост без активной сети — тоже считается
+    // "сервером" (авторитетом), просто с одним игроком.
+    return !Vars.net.active() || Vars.net.server();
+}
+
+if (Vars.net.server() || !Vars.net.active()) {
+    Events.on(EventType.ServerLoadEvent, () => registerServerHandlers());
+    // На случай если сервер уже поднят к моменту загрузки скрипта (headless старт)
+    registerServerHandlers();
+}
+
+let serverHandlersRegistered = false;
+function registerServerHandlers() {
+    if (serverHandlersRegistered) return;
+    if (!Vars.netServer) return;
+    serverHandlersRegistered = true;
+
+    Vars.netServer.addPacketHandler(PACKET_REQUEST, (player, contents) => {
+        const data = JSON.parse(contents);
+        const toTeam = Team.get(data.toTeamId);
+        const fromTeam = player.team();
+
+        const fromLaunchers = getLaunchersOfTeam(fromTeam);
+        const toLaunchers = getLaunchersOfTeam(toTeam);
+        if (fromLaunchers.length === 0 || toLaunchers.length === 0) return;
+
+        const item = Vars.content.item(data.item);
+        if (!item) return;
+
+        const req = {
+            id: nextRequestId++,
+            fromTeam: fromTeam,
+            toTeam: toTeam,
+            item: item,
+            amount: data.amount,
+            fromLauncher: fromLaunchers[0],
+            toLauncher: toLaunchers[0],
+            timer: 30 * 60
+        };
+        pendingRequests.push(req);
+
+        // Находим игрока(ов) команды-получателя и адресуем ИМЕННО им
+        Groups.player.each(p => {
+            if (p.team() && p.team().id === toTeam.id) {
+                Call.serverPacketReliable(p.con, PACKET_INCOMING, JSON.stringify({
+                    id: req.id,
+                    fromTeamId: fromTeam.id,
+                    item: item.name,
+                    amount: req.amount
+                }));
             }
-            spawnDelivery(fromLauncher, req.fromLauncher, req.item, req.amount, myTeam);
-            pendingRequests.splice(idx, 1);
-            shownRequests.delete(idx);
-            dialog.hide();
-        }).width(120).height(50).pad(6);
-
-        btnTable.button("[red]Отклонить", () => {
-            Vars.ui.announce("[red]Запрос от " + senderName + " отклонён.", 3);
-            pendingRequests.splice(idx, 1);
-            shownRequests.delete(idx);
-            dialog.hide();
-        }).width(120).height(50).pad(6);
-
-        dialog.show();
+        });
     });
 
-    // Убираем просроченные запросы
-    pendingRequests = pendingRequests.filter((req, idx) => {
-        req.timer--;
-        if (req.timer <= 0) {
-            shownRequests.delete(idx);
-            return false;
+    Vars.netServer.addPacketHandler(PACKET_RESPONSE, (player, contents) => {
+        const data = JSON.parse(contents);
+        const idx = pendingRequests.findIndex(r => r.id === data.id);
+        if (idx === -1) return;
+        const req = pendingRequests[idx];
+
+        // Только адресат запроса может на него отвечать
+        if (!player.team() || player.team().id !== req.toTeam.id) return;
+
+        pendingRequests.splice(idx, 1);
+
+        if (data.accepted) {
+            const fromLauncher = getLaunchersOfTeam(req.toTeam)[0];
+            if (fromLauncher) {
+                spawnDelivery(fromLauncher, req.fromLauncher, req.item, req.amount, req.toTeam);
+            }
         }
-        return true;
+        // При желании: разослать PACKET_RESULT инициатору запроса,
+        // чтобы показать "отклонено"/"принято" именно ему.
     });
 }
+
+function tickServerRequests() {
+    if (!isHostAuthority()) return;
+    pendingRequests = pendingRequests.filter(req => {
+        req.timer--;
+        return req.timer > 0;
+    });
+}
+
+// ── Сеть: обработчик НА КЛИЕНТЕ ─────────────────────────────────────
+// Клиент просто ждёт, пока сервер САМ решит адресовать ему конкретный
+// запрос, и показывает диалог. Никакого локального pendingRequests тут
+// не требуется.
+
+let clientHandlersRegistered = false;
+function registerClientHandlers() {
+    if (clientHandlersRegistered) return;
+    if (!Vars.netClient) return;
+    clientHandlersRegistered = true;
+
+    Vars.netClient.addPacketHandler(PACKET_INCOMING, contents => {
+        const data = JSON.parse(contents);
+        showIncomingRequestDialog({
+            id: data.id,
+            fromTeam: Team.get(data.fromTeamId),
+            item: Vars.content.item(data.item),
+            amount: data.amount
+        });
+    });
+}
+
+Events.on(EventType.ClientLoadEvent, () => {
+    registerClientHandlers();
+});
 
 // ── Дерево технологий ────────────────────────────────────────────
 // Регистрация узла TechTree теперь делается декларативно через поле
@@ -366,5 +496,5 @@ Events.on(EventType.ClientLoadEvent, () => {
 Events.run(Trigger.update, () => {
     if (!Vars.state.isGame()) return;
     updateDeliveries();
-    checkIncomingRequests();
+    tickServerRequests();
 });
