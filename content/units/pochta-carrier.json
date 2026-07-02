@@ -8,6 +8,5 @@
   "engineSize": 3,
   "rotateSpeed": 5,
   "drag": 0.06,
-  "accel": 0.08,
-  "constructor": "UnitEntity::create"
+  "accel": 0.08
 }
