@@ -5,6 +5,8 @@
 const COOLDOWN_SECONDS = 30;
 const MAX_ITEMS = 500;
 const UNIT_SPEED = 2.0;
+const UNLOAD_PORTION = 5;    // предметов за одну порцию выгрузки
+const UNLOAD_INTERVAL = 6;   // тиков между порциями
 
 const DELIVER_ITEMS = [
     Items.copper, Items.lead, Items.graphite, Items.coal,
@@ -104,13 +106,15 @@ function spawnDelivery(fromLauncher, toLauncher, item, amount, fromTeam) {
     const unit = pochtaType.create(fromTeam);
     unit.set(fromLauncher.x, fromLauncher.y);
     unit.add();
+    unit.addItem(item, Math.min(actual, unit.type.itemCapacity));
 
     activeDeliveries.push({
         unit: unit,
         toLauncher: toLauncher,
         item: item,
         amount: actual,
-        delivered: false
+        unloading: false,
+        unloadTimer: 0
     });
 
     Vars.ui.announce(
@@ -127,12 +131,18 @@ function spawnDelivery(fromLauncher, toLauncher, item, amount, fromTeam) {
 // сами реплицируются клиентам штатным механизмом синка сущностей движка
 // (entitySnapshot/blockSnapshot), т.е. отдельно синхронизировать unit.vel
 // вручную клиенту не нужно — он получит уже актуальную позицию по сети.
+//
+// Юнит везёт груз на себе (unit.stack, единственный ItemStack — ItemsComp)
+// и, долетев, не исчезает мгновенно: он останавливается у пусковой
+// установки и постепенно выгружает груз в её items порциями (dumpAccumulate
+// затем сам отдаёт предметы на подключённый конвейер, если он есть —
+// подтверждено по BuildingComp.java, тег v158.1). Ресурсы больше не
+// телепортируются напрямую в ядро получателя.
 
 function updateDeliveries() {
     if (!isHostAuthority()) return;
     activeDeliveries = activeDeliveries.filter(d => {
         if (!d.unit || !d.unit.isValid() || !d.unit.isAlive()) return false;
-        if (d.delivered) return false;
 
         const target = d.toLauncher;
         if (!target || !target.isValid()) {
@@ -140,19 +150,30 @@ function updateDeliveries() {
             return false;
         }
 
-        const dx = target.x - d.unit.x;
-        const dy = target.y - d.unit.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (!d.unloading) {
+            const dx = target.x - d.unit.x;
+            const dy = target.y - d.unit.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
 
-        if (dist < 24) {
-            // Доставлено — кладём ресурсы в ядро получателя
-            const receiverCore = target.team.core();
-            if (receiverCore) {
-                const space = receiverCore.storageCapacity - receiverCore.items.get(d.item);
-                receiverCore.items.add(d.item, Math.min(d.amount, space));
+            if (dist < 24) {
+                d.unit.vel.setZero();
+                d.unloading = true;
+                Vars.ui.announce(
+                    "[green]Почта России[] прибыла, выгружает посылку...",
+                    2
+                );
+                return true;
             }
+
+            d.unit.vel.set((dx / dist) * UNIT_SPEED, (dy / dist) * UNIT_SPEED);
+            d.unit.rotation = Mathf.angle(dx, dy);
+            d.unit.shield = 99999;
+            return true;
+        }
+
+        // ── Фаза выгрузки: переносим груз из юнита в блок порциями ────
+        if (!d.unit.hasItem() || d.unit.stack.amount <= 0) {
             d.unit.kill();
-            d.delivered = true;
             Vars.ui.announce(
                 "[green]Почта России[] доставила посылку!\n" +
                 "[yellow]" + d.amount + "x " + getItemName(d.item) + "[] получено!",
@@ -161,9 +182,17 @@ function updateDeliveries() {
             return false;
         }
 
-        d.unit.vel.set((dx / dist) * UNIT_SPEED, (dy / dist) * UNIT_SPEED);
-        d.unit.rotation = Mathf.angle(dx, dy);
-        d.unit.shield = 99999;
+        d.unloadTimer++;
+        if (d.unloadTimer >= UNLOAD_INTERVAL) {
+            d.unloadTimer = 0;
+            const space = target.block.itemCapacity - target.items.get(d.item);
+            const portion = Math.min(UNLOAD_PORTION, d.unit.stack.amount, Math.max(space, 0));
+            if (portion > 0) {
+                d.unit.stack.amount -= portion;
+                target.items.add(d.item, portion);
+            }
+            target.dumpAccumulate(d.item);
+        }
         return true;
     });
 }
