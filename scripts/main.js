@@ -325,6 +325,21 @@ function checkIncomingRequests() {
     });
 }
 
+// ── Дерево технологий ────────────────────────────────────────────
+
+Events.on(ContentInitEvent, () => {
+    const launcherBlock = Vars.content.block("pochta-rossii-postal-launcher");
+    const coreNode = TechTree.all.find(n => n.block === Blocks.coreShard);
+
+    if (launcherBlock && coreNode) {
+        const node = new TechNode(coreNode, launcherBlock, [
+            new ItemStack(Items.copper, 100)
+        ]);
+        coreNode.children.add(node);
+        TechTree.all.add(node);
+    }
+});
+
 // ── HUD кнопка ────────────────────────────────────────────────────
 
 Events.on(EventType.ClientLoadEvent, () => {
