@@ -1,6 +1,5 @@
 {
-  "type": "UnitType",
-  "flying": true,
+  "type": "flying",
   "speed": 1.5,
   "health": 250,
   "hitSize": 10,
@@ -10,5 +9,5 @@
   "rotateSpeed": 5,
   "drag": 0.06,
   "accel": 0.08,
-  "constructor": "UnitEntity"
+  "constructor": "UnitEntity::create"
 }

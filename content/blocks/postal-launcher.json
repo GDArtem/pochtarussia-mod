@@ -2,7 +2,6 @@
   "type": "UnitFactory",
   "size": 3,
   "health": 800,
-  "buildCost": 60,
   "buildVisibility": "shown",
   "requirements": [
     {"item": "copper", "amount": 100}
@@ -16,7 +15,6 @@
   "category": "units",
   "hasItems": true,
   "itemCapacity": 500,
-  "outputsItems": true,
   "hasPower": false,
   "plans": [
     {"unit": "pochta-carrier", "time": 60, "requirements": []}
